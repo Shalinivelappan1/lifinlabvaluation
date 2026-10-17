@@ -171,9 +171,45 @@ def fetch_ticker(ticker: str):
             hist_rev.append(float(v) / scale)
             if ebit_s is not None and d in ebit_s.index:
                 hist_ebit.append(float(ebit_s[d]) / scale)
-    shares = (info.get("sharesOutstanding") or 0) / scale
+    # shares: company info -> fast_info -> balance sheet -> income statement average shares
+    shares_raw = info.get("sharesOutstanding") or 0
+    fi = None
+    try:
+        fi = tk.fast_info
+    except Exception:
+        fi = None
+    if not shares_raw and fi is not None:
+        try:
+            shares_raw = float(fi["shares"] or 0)
+        except Exception:
+            shares_raw = 0
+    if not shares_raw:
+        s_ = _pick(bs, ["Ordinary Shares Number", "Share Issued"])
+        if s_ is not None:
+            shares_raw = float(s_.iloc[0])
+    if not shares_raw:
+        s_ = _pick(inc, ["Diluted Average Shares", "Basic Average Shares"])
+        if s_ is not None:
+            shares_raw = float(s_.iloc[0])
+    shares = shares_raw / scale
     if not shares:
-        warnings.append("Shares outstanding not found: set it by hand.")
+        warnings.append("Shares outstanding not found: enter it on the Company tab.")
+    # price: company info -> fast_info -> last close
+    price = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0.0)
+    if not price and fi is not None:
+        try:
+            price = float(fi["last_price"] or 0.0)
+        except Exception:
+            price = 0.0
+    if not price:
+        try:
+            h_ = tk.history(period="5d")
+            if not h_.empty:
+                price = float(h_["Close"].dropna().iloc[-1])
+        except Exception:
+            pass
+    if not price:
+        warnings.append("Share price not found: enter it on the Company tab.")
     c = Company(
         name=info.get("longName") or info.get("shortName") or ticker, ticker=ticker,
         sector=info.get("sector") or info.get("industry") or "", currency=sym, unit=unit,
@@ -185,7 +221,7 @@ def fetch_ticker(ticker: str):
         debt=latest(bs, ["Total Debt"], "Total debt", default=(info.get("totalDebt") or 0) / scale),
         minority=latest(bs, ["Minority Interest"], "Minority interest"),
         non_operating=0.0, options=0.0, shares=shares,
-        price=float(info.get("currentPrice") or info.get("regularMarketPrice") or 0.0),
+        price=price,
         eff_tax=eff_tax,
         interest=latest(inc, ["Interest Expense", "Interest Expense Non Operating"], "Interest expense"),
         net_income=latest(inc, ["Net Income", "Net Income Common Stockholders"], "Net income"),

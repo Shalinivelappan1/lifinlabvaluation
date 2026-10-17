@@ -12,16 +12,42 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from lv_checks import STORIES, health_checks
-from lv_data import (EMPTY_PEERS, FIELDS, SAMPLE_PEERS, SAMPLES, company_from_upload,
-                            fetch_ticker, sample_company, template_csv)
-from lv_engine import Assumptions, Company, defaults_from_company, run_dcf
-from lv_explain import TIPS
-from lv_export import from_json, to_excel, to_json
-from lv_models import run_ddm, run_fcfe, run_relative, run_residual_income
-from lv_risk import (monte_carlo, reverse_dcf, scenarios, sensitivity_two,
-                            sensitivity_wacc_growth, tornado)
-from lv_wacc import RATING_TABLE, WaccInputs
+# Works with either layout: a 'valuation' folder, or flat lv_*.py files.
+try:
+    from valuation.checks import STORIES, health_checks
+    from valuation.data import (EMPTY_PEERS, FIELDS, SAMPLE_PEERS, SAMPLES, company_from_upload,
+                                fetch_ticker, sample_company, template_csv)
+    from valuation.engine import Assumptions, Company, defaults_from_company, run_dcf
+    from valuation.explain import TIPS
+    from valuation.export import from_json, to_excel, to_json
+    from valuation.models import run_ddm, run_fcfe, run_relative, run_residual_income
+    from valuation.risk import (monte_carlo, reverse_dcf, scenarios, sensitivity_two,
+                                sensitivity_wacc_growth, tornado)
+    from valuation.wacc import RATING_TABLE, WaccInputs
+except ImportError:
+    from lv_checks import STORIES, health_checks
+    from lv_data import (EMPTY_PEERS, FIELDS, SAMPLE_PEERS, SAMPLES, company_from_upload,
+                                fetch_ticker, sample_company, template_csv)
+    from lv_engine import Assumptions, Company, defaults_from_company, run_dcf
+    from lv_explain import TIPS
+    from lv_export import from_json, to_excel, to_json
+    from lv_models import run_ddm, run_fcfe, run_relative, run_residual_income
+    from lv_risk import (monte_carlo, reverse_dcf, scenarios, sensitivity_two,
+                                sensitivity_wacc_growth, tornado)
+    from lv_wacc import RATING_TABLE, WaccInputs
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def guard(name):
+    """Show an error inside one tab instead of stopping the whole app."""
+    try:
+        yield
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Something went wrong in {name}: {type(e).__name__}: {e}. The other tabs still work. "
+                 "Check the inputs on the Company tab (shares, price, revenue).")
+
 
 st.set_page_config(page_title="Equity Valuation Studio · LiFin Lab", page_icon="📈", layout="wide")
 
@@ -251,17 +277,17 @@ with st.sidebar:
     src = st.radio("Source", ["Sample company", "Live ticker", "Upload file"], key="src")
     if src == "Sample company":
         st.selectbox("Sample", list(SAMPLES), key="sample_key")
-        st.button("Load sample", on_click=cb_load_sample, use_container_width=True)
+        st.button("Load sample", on_click=cb_load_sample, width="stretch")
         st.caption("Fictional companies with realistic numbers. Work offline.")
     elif src == "Live ticker":
         st.text_input("Ticker (Yahoo Finance)", key="ticker_in", placeholder="INFY.NS, HINDUNILVR.NS, AAPL")
-        st.button("Fetch financials", on_click=cb_fetch, use_container_width=True)
+        st.button("Fetch financials", on_click=cb_fetch, width="stretch")
         st.caption("Needs internet. Indian tickers end in .NS (NSE) or .BO (BSE) and load in ₹ crore.")
     else:
         st.download_button("Download blank template (CSV)", template_csv(), "company_template.csv",
-                           use_container_width=True)
+                           width="stretch")
         st.file_uploader("Upload filled template (CSV or Excel)", type=["csv", "xlsx"], key="upload_file")
-        st.button("Load file", on_click=cb_upload, use_container_width=True)
+        st.button("Load file", on_click=cb_upload, width="stretch")
     if st.session_state.get("msg"):
         kind, text = st.session_state["msg"]
         (st.success if kind == "ok" else st.error)(text)
@@ -280,11 +306,17 @@ ss["a_high_growth_years"] = int(min(ss["a_years"], max(1, ss["a_high_growth_year
 ss["a_margin_converge_year"] = int(min(ss["a_years"], max(1, ss["a_margin_converge_year"])))
 C = get_company()
 A = get_assumptions()
-try:
-    R = run_dcf(C, A)
-    dcf_error = None
-except Exception as e:
-    R, dcf_error = None, str(e)
+missing = [lab for ok, lab in ((C.shares > 0, "shares outstanding"), (C.revenue > 0, "revenue"),
+                               (C.price > 0, "share price")) if not ok]
+if missing:
+    R, dcf_error = None, ("Enter " + ", ".join(missing) + " on the ① Company tab to run the valuation. "
+                          "(The live data feed did not supply them.)")
+else:
+    try:
+        R = run_dcf(C, A)
+        dcf_error = None
+    except Exception as e:
+        R, dcf_error = None, str(e)
 
 st.markdown(f"## {C.name} <span style='font-size:1rem;color:{GREY}'>{C.ticker} · {C.sector}</span>",
             unsafe_allow_html=True)
@@ -297,14 +329,15 @@ if R:
     kpi(k4, "WACC", pct(R["wacc_used"]))
     kpi(k5, "Terminal value share", pct(R["tv_share"], 0))
 else:
-    k2.error(dcf_error)
+    k2.error("Valuation paused")
+    st.warning(dcf_error, icon="⚠️")
 
 tabs = st.tabs(["① Company", "② Story", "③ Cost of capital", "④ Forecast & DCF", "⑤ Other models",
                 "⑥ Risk & judgement", "⑦ Health check", "⑧ Summary & export"])
 U = f"{C.currency} {C.unit}"
 
 # ---------------------------------------------------------------- 1 company
-with tabs[0]:
+with tabs[0], guard("Company"):
     tip("company")
     a1, a2, a3 = st.columns(3)
     a1.text_input("Company name", key="c_name")
@@ -334,8 +367,9 @@ with tabs[0]:
     kpi(d[2], "EBIT margin", pct(C.ebit / C.revenue if C.revenue else np.nan))
     ic = C.ic0()
     kpi(d[3], "ROIC (after tax)", pct(C.ebit * (1 - C.eff_tax) / ic if ic else np.nan))
-    kpi(d[4], "Sales / capital", f"{C.revenue / ic:.2f}" if ic else "–")
-    kpi(d[5], "P/E", f"{C.price / (C.net_income / C.shares):.1f}×" if C.net_income > 0 else "–")
+    kpi(d[4], "Sales / capital", f"{C.revenue / ic:.2f}" if ic and C.revenue else "–")
+    kpi(d[5], "P/E", f"{C.price / (C.net_income / C.shares):.1f}×"
+        if C.net_income > 0 and C.shares > 0 and C.price > 0 else "–")
     h = C.history or {}
     if h.get("revenue"):
         fig = go.Figure()
@@ -347,17 +381,17 @@ with tabs[0]:
         fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10), title="History",
                           yaxis=dict(title=U), yaxis2=dict(overlaying="y", side="right", title="%"),
                           plot_bgcolor="white", legend=dict(orientation="h"))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 # ---------------------------------------------------------------- 2 story
-with tabs[1]:
+with tabs[1], guard("Story"):
     tip("story")
     st.markdown("#### Pick a starting story, then make it yours")
     s1, s2 = st.columns([2, 1])
     s1.selectbox("Story archetype", list(STORIES), key="story_key")
     s2.write("")
     s2.write("")
-    s2.button("Apply story to the numbers", on_click=cb_apply_story, use_container_width=True)
+    s2.button("Apply story to the numbers", on_click=cb_apply_story, width="stretch")
     p = STORIES.get(st.session_state["story_key"])
     if p:
         st.caption(p["blurb"])
@@ -384,10 +418,10 @@ with tabs[1]:
             ["Does the moat last for ever?", "Terminal ROIC", pct(A.terminal_roic)],
             ["Could it fail?", "Probability of failure", pct(A.failure_prob, 0)],
         ], columns=["Story question", "Model input", "Your number"])
-        st.dataframe(mapping, hide_index=True, use_container_width=True)
+        st.dataframe(mapping, hide_index=True, width="stretch")
 
 # ---------------------------------------------------------------- 3 cost of capital
-with tabs[2]:
+with tabs[2], guard("Cost of capital"):
     l, r = st.columns([1, 1])
     with l:
         st.markdown("#### Cost of equity (CAPM)")
@@ -434,7 +468,7 @@ with tabs[2]:
                 ["Pre-tax cost of debt", pct(w["kd_pre"], 2)], ["After-tax cost of debt", pct(w["kd_post"], 2)],
                 ["Weights E / D", f"{w['e_v']:.0%} / {w['d_v']:.0%}"], ["WACC", pct(R["wacc_used"], 2)],
             ], columns=["Step", "Value"])
-            st.dataframe(steps, hide_index=True, use_container_width=True)
+            st.dataframe(steps, hide_index=True, width="stretch")
             wi = A.wacc
             crp_part = w["beta"] * wi.crp if wi.crp_scaled_by_beta else wi.crp
             fig = go.Figure(go.Waterfall(
@@ -445,16 +479,16 @@ with tabs[2]:
                 totals=dict(marker_color=NAVY), texttemplate="%{y:.2f}%"))
             fig.update_layout(height=280, margin=dict(l=10, r=10, t=30, b=10), title="Cost of equity build-up (%)",
                               plot_bgcolor="white", showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
     with st.expander("Rating table used for the synthetic cost of debt"):
         st.dataframe(pd.DataFrame([(f"> {f:.2f}" if np.isfinite(f) else "below", r_, f"{s:.2%}")
                                    for f, r_, s in RATING_TABLE],
                                   columns=["Interest coverage", "Rating", "Default spread"]),
-                     hide_index=True, use_container_width=True)
+                     hide_index=True, width="stretch")
         st.caption("Illustrative spreads in the style of Damodaran's annual table. Update them each year.")
 
 # ---------------------------------------------------------------- 4 forecast & dcf
-with tabs[3]:
+with tabs[3], guard("Forecast & DCF"):
     g1, g2, g3 = st.columns(3)
     with g1:
         st.markdown("#### Growth")
@@ -532,7 +566,7 @@ with tabs[3]:
                 fmt.loc[idx, col] = pct(v) if idx in pct_rows else (f"{v:.4f}" if idx == "Discount factor"
                                                                    else f"{v:,.0f}")
         st.markdown(f"#### Forecast ({U})")
-        st.dataframe(fmt, use_container_width=True, height=600)
+        st.dataframe(fmt, width="stretch", height=600)
         ch1, ch2 = st.columns(2)
         fig = go.Figure()
         fig.add_bar(x=T.index, y=T["NOPAT"], name="NOPAT", marker_color=NAVY)
@@ -540,7 +574,7 @@ with tabs[3]:
         fig.add_scatter(x=T.index, y=T["FCFF"], name="FCFF", mode="lines+markers", line=dict(color=TEAL, width=3))
         fig.update_layout(barmode="relative", height=340, title="Where free cash flow comes from",
                           plot_bgcolor="white", margin=dict(l=10, r=10, t=40, b=10), legend=dict(orientation="h"))
-        ch1.plotly_chart(fig, use_container_width=True)
+        ch1.plotly_chart(fig, width="stretch")
         adj_fail = R["op_value_adj"] - R["op_value"]
         wf = go.Figure(go.Waterfall(
             x=["PV forecast FCFF", "PV terminal value", "Failure adj.", "+ Cash", "+ Non-operating", "− Debt",
@@ -551,11 +585,11 @@ with tabs[3]:
             connector=dict(line=dict(color=GREY))))
         wf.update_layout(height=340, title=f"From operating value to equity ({U})", plot_bgcolor="white",
                          margin=dict(l=10, r=10, t=40, b=10))
-        ch2.plotly_chart(wf, use_container_width=True)
+        ch2.plotly_chart(wf, width="stretch")
 
 # ---------------------------------------------------------------- 5 other models
 F = D = RI = REL = None
-with tabs[4]:
+with tabs[4], guard("Other models"):
     sub = st.tabs(["FCFE", "Dividend discount", "Residual income", "Relative (peers)"])
     with sub[0]:
         tip("fcfe")
@@ -570,7 +604,7 @@ with tabs[4]:
                 kpi(q[1], f"PV terminal ({U})", money(F["pv_tv"], C))
                 kpi(q[2], "FCFE value per share", money(F["per_share"], C, 2))
                 kpi(q[3], "vs FCFF value", f"{F['per_share'] / R['per_share'] - 1:+.1%}")
-                st.dataframe(F["table"].T.style.format("{:,.0f}"), use_container_width=True)
+                st.dataframe(F["table"].T.style.format("{:,.0f}"), width="stretch")
             except ValueError as e:
                 st.error(str(e))
     with sub[1]:
@@ -592,7 +626,7 @@ with tabs[4]:
                     kpi(q[0], "PV of stage-1 dividends", money(D["pv_stage1"], C, 2))
                     kpi(q[1], "PV of terminal value", money(D["pv_tv"], C, 2))
                     kpi(q[2], "DDM value per share", money(D["per_share"], C, 2))
-                    st.dataframe(D["table"].T.style.format("{:,.2f}"), use_container_width=True)
+                    st.dataframe(D["table"].T.style.format("{:,.2f}"), width="stretch")
                 except ValueError as e:
                     st.error(str(e))
     with sub[2]:
@@ -615,28 +649,30 @@ with tabs[4]:
                 kpi(q[0], f"Book value today ({U})", money(C.book_equity, C))
                 kpi(q[1], f"PV of residual income ({U})", money(RI["equity"] - C.book_equity, C))
                 kpi(q[2], "RI value per share", money(RI["per_share"], C, 2))
-                st.dataframe(RI["table"].T.style.format("{:,.2f}"), use_container_width=True)
+                st.dataframe(RI["table"].T.style.format("{:,.2f}"), width="stretch")
             except ValueError as e:
                 st.error(str(e))
     with sub[3]:
         tip("relative")
         st.caption("Edit the peer table: add rows, paste from Excel, or clear cells you do not trust.")
         PEERS = st.data_editor(st.session_state["peers_df"], num_rows="dynamic",
-                               use_container_width=True, key="peer_editor")
+                               width="stretch", key="peer_editor")
         st.session_state["peers_edited"] = PEERS
         stat = st.radio("Peer statistic", ["median", "mean", "harmonic mean"], horizontal=True, key="rel_stat")
-        REL = run_relative(C, PEERS, stat)
-        if REL.empty:
+        REL = run_relative(C, PEERS, stat) if R else pd.DataFrame()
+        if not R:
+            st.warning(dcf_error or "Complete the company data first.")
+        elif REL.empty:
             st.warning("Enter at least one peer multiple.")
         else:
             st.dataframe(REL.style.format({"Peer value used": "{:.1f}", "Peer low": "{:.1f}", "Peer high": "{:.1f}",
                                            "Company today": "{:.1f}", "Implied price": "{:,.2f}",
                                            "Implied low": "{:,.2f}", "Implied high": "{:,.2f}"}),
-                         hide_index=True, use_container_width=True)
+                         hide_index=True, width="stretch")
 
 # ---------------------------------------------------------------- 6 risk
 SCN = MC = None
-with tabs[5]:
+with tabs[5], guard("Risk & judgement"):
     sub = st.tabs(["Sensitivity", "Tornado", "Scenarios", "Monte Carlo", "Reverse DCF"])
     if R:
         w0 = R["wacc_used"]
@@ -648,14 +684,14 @@ with tabs[5]:
             S1 = sensitivity_wacc_growth(C, A, wv, gv)
             st.markdown("**Value per share: terminal growth (rows) × WACC (columns)**")
             st.dataframe(S1.style.format("{:,.2f}", na_rep="g ≥ WACC").background_gradient(cmap="RdYlGn", axis=None),
-                         use_container_width=True)
+                         width="stretch")
             gs = [A.growth_stage1 + d for d in (-0.06, -0.03, 0, 0.03, 0.06)]
             ms = [A.target_margin + d for d in (-0.04, -0.02, 0, 0.02, 0.04)]
             S2 = sensitivity_two(C, A, "growth_stage1", gs, "target_margin", ms)
             S2.index.name = "Stage-1 growth \\ target margin"
             st.markdown("**Value per share: stage-1 growth (rows) × target margin (columns)**")
             st.dataframe(S2.style.format("{:,.2f}").background_gradient(cmap="RdYlGn", axis=None),
-                         use_container_width=True)
+                         width="stretch")
         with sub[1]:
             shocks = {
                 "Stage-1 growth ±3 pts": ("growth_stage1", A.growth_stage1 - 0.03, A.growth_stage1 + 0.03),
@@ -674,7 +710,7 @@ with tabs[5]:
             fig.add_vline(x=base, line_color=NAVY)
             fig.update_layout(barmode="overlay", height=380, title="Which assumption moves value most?",
                               plot_bgcolor="white", margin=dict(l=10, r=10, t=40, b=10), legend=dict(orientation="h"))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
             st.caption("Each bar changes one input and holds the rest at your base case.")
         with sub[2]:
             tip("scenarios")
@@ -689,7 +725,7 @@ with tabs[5]:
                     "Terminal growth %": [round((A.terminal_growth - 0.01) * 100, 1),
                                           round(A.terminal_growth * 100, 1), round(A.terminal_growth * 100, 1)]})
                 st.session_state["scn_for"] = C.name
-            sdf = st.data_editor(st.session_state["scn_df"], num_rows="dynamic", use_container_width=True,
+            sdf = st.data_editor(st.session_state["scn_df"], num_rows="dynamic", width="stretch",
                                  key="scn_editor", hide_index=True)
             spec = {r["Scenario"]: {"prob": r["Probability %"] / 100, "growth": r["Stage-1 growth %"] / 100,
                                     "margin": r["Target margin %"] / 100, "wacc_shift": r["WACC shift (pts)"] / 100,
@@ -706,7 +742,7 @@ with tabs[5]:
                 st.warning("Probabilities do not add to 100%; the weighted value is rescaled.")
             st.dataframe(SCN.style.format({"Probability": "{:.0%}", "Stage-1 growth": "{:.1%}",
                                            "Target margin": "{:.1%}", "WACC": "{:.2%}", "Terminal growth": "{:.1%}",
-                                           "Value per share": "{:,.2f}"}), hide_index=True, use_container_width=True)
+                                           "Value per share": "{:,.2f}"}), hide_index=True, width="stretch")
         with sub[3]:
             tip("mc")
             mc1, mc2, mc3 = st.columns(3)
@@ -751,7 +787,7 @@ with tabs[5]:
                 fig.add_vline(x=p_["P50"], line_color=GOLD, line_width=3, annotation_text="Median")
                 fig.update_layout(height=360, title="Distribution of value per share", plot_bgcolor="white",
                                   margin=dict(l=10, r=10, t=40, b=10))
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
                 st.caption("Inputs that are not simulated stay at your base case. Draws where terminal growth would "
                            "exceed WACC are capped 1 point below WACC.")
         with sub[4]:
@@ -779,7 +815,7 @@ with tabs[5]:
                            "The gap is too large for this one driver to explain.")
 
 # ---------------------------------------------------------------- 7 health
-with tabs[6]:
+with tabs[6], guard("Health check"):
     tip("checks")
     if R:
         peer_med = None
@@ -799,7 +835,7 @@ with tabs[6]:
             st.markdown(f"<div class='chk {lvl}'><b>{icon[lvl]} {title}</b><br>{msg}</div>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------- 8 summary
-with tabs[7]:
+with tabs[7], guard("Summary & export"):
     tip("summary")
     if R:
         ranges = []
@@ -835,7 +871,7 @@ with tabs[7]:
         fig.add_vline(x=C.price, line_color=RED, line_width=3, annotation_text=f"Price {money(C.price, C, 0)}")
         fig.update_layout(height=80 + 46 * len(ranges), title="Football field: value per share by method",
                           plot_bgcolor="white", margin=dict(l=10, r=10, t=50, b=10))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         st.markdown("#### Your final call")
         methods = {"DCF (FCFF)": R["per_share"]}
@@ -896,11 +932,11 @@ with tabs[7]:
         e1, e2, e3 = st.columns(3)
         safe = "".join(ch if ch.isalnum() else "_" for ch in C.name)[:40]
         e1.download_button("⬇ Excel workbook", to_excel(sheets), f"{safe}_valuation.xlsx",
-                           use_container_width=True)
+                           width="stretch")
         e2.download_button("⬇ Save inputs (.json)",
                            to_json(C, A, narr, {"peers": st.session_state.get("peers_edited", st.session_state["peers_df"])
                                                .to_dict(orient="list")}),
-                           f"{safe}_valuation.json", use_container_width=True)
+                           f"{safe}_valuation.json", width="stretch")
         memo = [f"# {C.name}: valuation memo", "",
                 f"**Value per share:** {money(final, C, 2)} vs price {money(C.price, C, 2)} ({upside:+.1%}) → **{call}**",
                 "", "## Story", narr["n_story"] or "_(not written)_", "", "## Opportunity", narr["n_market"] or "–",
@@ -914,4 +950,4 @@ with tabs[7]:
                 *[f"- {k}: {money(v, C, 2)} (weight {weights[k]}%)" for k, v in methods.items()],
                 "", "_Prepared with LiFin Lab Valuation Studio. Teaching tool, not investment advice._"]
         e3.download_button("⬇ One-page memo (.md)", "\n".join(memo).encode(), f"{safe}_memo.md",
-                           use_container_width=True)
+                           width="stretch")
